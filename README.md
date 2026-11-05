@@ -1,46 +1,11 @@
 # 期中考试个人看板 
-没啥，AI搓的，只是想玩一玩，现有的https://brsexam.approacher.org/ 更完善
+没啥用，AI搓的，只是想玩一玩，现有的https://brsexam.approacher.org/ 更完善
+访问：https://liwangyu917813.github.io/personal_testchecker_wangfu/ 即可试用
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+以下也是AI写的readme
 ## 仓库结构
 ```
 index.html          网页本体
