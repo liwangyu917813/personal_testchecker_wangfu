@@ -8,11 +8,6 @@ core.js / app.js    页面逻辑（与 index.html 同目录即可）
 data/exam.xlsx      考试数据（管理员每学期覆盖上传这一份文件即可）
 ```
 
-## 首次部署（纯网页操作，无需 git）
-1. GitHub 新建一个仓库（Public）
-2. 把本目录全部内容上传（Add file → Upload files，可整批拖入）
-3. Settings → Pages → Branch 选 main（或 master）→ Save
-4. 约 1 分钟后访问 https://<用户名>.github.io/<仓库名>/
 
 ## 每学期更新（运营者唯一要做的动作）
 - 打开仓库 → data/ → 把新的监考表改名为 exam.xlsx 覆盖上传 → Commit
