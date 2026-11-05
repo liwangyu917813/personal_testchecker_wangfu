@@ -930,6 +930,20 @@ function getExamDetail(parsed, indexOrRef) {
 }
 
 /**
+ * v7.1：按全表源行号 _row 取详情（供 UI 弹层使用，杜绝“个人数组下标 ≠ 全表下标”的错位）。
+ * _row 是 parseWorkbook 写入每场考试的唯一稳定标识（= 源表行号，从 1 起）。
+ * @param {{exams:Array}} parsed parseWorkbook 的返回值
+ * @param {number} row 源行号（考试对象的 _row 字段）
+ * @returns {object|null} 详情对象；无效输入返回 null
+ */
+function getExamDetailByRow(parsed, row) {
+  if (!parsed || !Array.isArray(parsed.exams) || typeof row !== 'number') return null;
+  const ex = parsed.exams.find((e) => e && e._row === row) || null;
+  if (!ex) return null;
+  return getExamDetail(parsed, ex);   // 复用对象引用分支
+}
+
+/**
  * 按姓名查找考试（公开 API，供 UI 层调用）。
  * 匹配顺序：精确匹配（归一化后相等）→ 部分匹配（互为子串，返回候选名单）。
  * 同名检测双信号（避免合考场误报）：
@@ -1030,7 +1044,7 @@ function findExamsForStudent(parsed, rawName) {
 
 /* ---------- 导出 ---------- */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseWorkbook, findExamsForStudent, getExamDetail, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
+  module.exports = { parseWorkbook, findExamsForStudent, getExamDetail, getExamDetailByRow, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
 } else if (typeof window !== 'undefined') {
-  window.ExamCore = { parseWorkbook, findExamsForStudent, getExamDetail, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
+  window.ExamCore = { parseWorkbook, findExamsForStudent, getExamDetail, getExamDetailByRow, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
 }

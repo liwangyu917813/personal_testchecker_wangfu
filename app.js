@@ -389,7 +389,7 @@
       html += '<div class="dayGroup"><div class="dayTitle' + (isToday ? ' todayRow' : '') + '"><span>' + md + '（' + wd + '）</span>' +
         (isToday ? '<span class="todayBadge">今天</span>' : '') + '</div>';
       for (const ex of g.items) {
-        const idx = exams.indexOf(ex);
+        const idx = (typeof ex._row === 'number') ? ex._row : exams.indexOf(ex);   // v7.1：优先用全表 _row，杜绝个人数组下标与全表下标错位
         const cls = 'examCard clickable' + (ex._past ? ' past' : '') + (ex._now ? ' isNow' : '') + (idx === nextIdx && !ex._now ? ' next' : '');
         const dur = ex.minutes ? '<span class="dur">时长 ' + ex.minutes + ' 分钟</span>' : '';
         const nowB = ex._now ? '<span class="nowBadge">● 进行中</span>' : '';
@@ -503,7 +503,10 @@
   /** v7：详情弹层。点击考试卡片 → 展示监考老师 + 同场考生 + 完整信息。
    *  渲染在独立遮罩层，Esc / 点遮罩 / 关闭按钮均可退出；学生名单点击可直接查该同学。 */
   function openExamDetail(idx, queryName) {
-    const d = ExamCore.getExamDetail(parsed, idx);
+    // v7.1 修复：idx 现在传入的是考试对象的 _row（全表源行号）。按 _row 查详情；
+    // 若查不到（旧数据兼容）再退回下标语义。另加防线：详情里必须包含查询人本人，否则视为串场拒绝展示。
+    let d = (typeof ExamCore.getExamDetailByRow === 'function') ? ExamCore.getExamDetailByRow(parsed, idx) : null;
+    if (!d) d = ExamCore.getExamDetail(parsed, idx);
     if (!d) return;   // 冗余防护：数据结构异常时静默退出，不影响看板
     // 遮罩层只建一次，重复调用复用
     let overlay = document.getElementById('detailOverlay');
@@ -517,11 +520,16 @@
         '  <div id="detailBody"></div>' +
         '</div>';
       document.body.appendChild(overlay);
+      // v7.1 修复：改用 closest 判定（✕ 内部文本/遮罩/按钮任意命中都关闭），并给按钮直绑双保险
       overlay.addEventListener('click', (ev) => {
-        if (ev.target.classList.contains('detailMask') || ev.target.id === 'detailClose') closeExamDetail();
+        const t = ev.target;
+        if (!t || !t.closest) return;
+        if (t.closest('.detailClose') || t.closest('.detailMask')) closeExamDetail();
       });
       document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeExamDetail(); });
     }
+    const closeBtn = overlay.querySelector('#detailClose');
+    if (closeBtn) closeBtn.addEventListener('click', closeExamDetail);   // 双保险：直绑一次
     const body = overlay.querySelector('#detailBody');
     const headRow = '<div class="dtDate">' + escapeHtml(d.date) + '（' + escapeHtml(d.weekday) + '）' +
       '<span class="dtTime">' + escapeHtml(d.time) +
@@ -556,7 +564,6 @@
     });
     overlay.classList.add('open');
     document.body.classList.add('modalOpen');   // 锁定背景滚动
-    const closeBtn = overlay.querySelector('#detailClose');
     if (closeBtn) closeBtn.focus();
   }
 
