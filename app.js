@@ -513,23 +513,32 @@
     if (!overlay) {
       overlay = document.createElement('div');
       overlay.id = 'detailOverlay';
+      // v7.2：✕ 按钮内联 onclick（DOM 一创建就有，不依赖任何后续绑定环境）；
+      // 捕获阶段委托作第二道保险；直绑（只绑一次）作第三道保险。三重保障任何环境都能关。
       overlay.innerHTML =
         '<div class="detailMask"></div>' +
         '<div class="detailModal" role="dialog" aria-modal="true">' +
-        '  <button class="detailClose" id="detailClose" title="关闭 (Esc)">✕</button>' +
+        '  <button class="detailClose" id="detailClose" title="关闭 (Esc)" onclick="window.__examDetailClose &amp;&amp; window.__examDetailClose()">✕</button>' +
         '  <div id="detailBody"></div>' +
         '</div>';
       document.body.appendChild(overlay);
-      // v7.1 修复：改用 closest 判定（✕ 内部文本/遮罩/按钮任意命中都关闭），并给按钮直绑双保险
+      // 捕获阶段委托：事件还没冒泡就被处理，防任何 stopPropagation 干扰
       overlay.addEventListener('click', (ev) => {
         const t = ev.target;
         if (!t || !t.closest) return;
-        if (t.closest('.detailClose') || t.closest('.detailMask')) closeExamDetail();
-      });
+        if (t.closest('.detailClose') || t.closest('.detailMask')) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          closeExamDetail();
+        }
+      }, true);
       document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeExamDetail(); });
     }
     const closeBtn = overlay.querySelector('#detailClose');
-    if (closeBtn) closeBtn.addEventListener('click', closeExamDetail);   // 双保险：直绑一次
+    if (closeBtn && !closeBtn.__bound) {           // 直绑第三道保险（只绑一次，防重复叠加）
+      closeBtn.__bound = true;
+      closeBtn.addEventListener('click', closeExamDetail);
+    }
     const body = overlay.querySelector('#detailBody');
     const headRow = '<div class="dtDate">' + escapeHtml(d.date) + '（' + escapeHtml(d.weekday) + '）' +
       '<span class="dtTime">' + escapeHtml(d.time) +

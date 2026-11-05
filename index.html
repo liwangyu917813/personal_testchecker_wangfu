@@ -177,12 +177,14 @@ h1 { font-size: 22px; margin-bottom: 6px; }
 .detailHint { font-size: 11px; opacity: 0; margin-left: 6px; color: var(--accent); font-weight: 700; transition: opacity .18s ease; white-space: nowrap; }
 .examCard.clickable:hover .detailHint, .examCard.clickable:focus .detailHint { opacity: 1; }
 body.modalOpen { overflow: hidden; }
-.detailOverlay { position: fixed; inset: 0; z-index: 999; display: none; }
+.detailOverlay { position: fixed; inset: 0; z-index: 9999; display: none; }
 .detailOverlay.open { display: block; }
 .detailMask { position: absolute; inset: 0; background: rgba(15,23,42,.55); backdrop-filter: blur(2px); animation: fadeIn .2s ease both; }
+/* v7.2：弹窗居中改用 flex 布局（不依赖 transform 定位），任何屏幕尺寸都严格居中且不出屏 */
+.detailOverlay.open { display: flex; align-items: center; justify-content: center; padding: 18px; }
 .detailModal {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-  width: min(560px, calc(100vw - 36px)); max-height: 82vh; overflow-y: auto;
+  position: relative;
+  width: min(560px, 100%); max-height: min(82vh, 100%); overflow-y: auto;
   background: #fff; border-radius: 18px; padding: 26px 26px 22px;
   box-shadow: 0 24px 64px rgba(15,23,42,.35); animation: popIn .28s cubic-bezier(.2,.9,.3,1.2) both;
 }
@@ -237,6 +239,7 @@ body.modalOpen { overflow: hidden; }
   .examCard { grid-template-columns: 1fr; }
   .examCard .roomTag { justify-self: start; }
   .card { padding: 20px 16px; }
+  .detailOverlay.open { padding: 10px; }   /* v7.2：小屏留出遮罩边距，弹窗仍 flex 居中 */
   .detailModal { padding: 22px 16px 18px; border-radius: 14px; }
   .dtChips { gap: 6px; }
 }
