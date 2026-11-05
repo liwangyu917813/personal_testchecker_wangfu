@@ -1,5 +1,8 @@
-https://liwangyu917813.github.io/personal_testchecker_wangfu/
-# 期中考试个人看板 · GitHub Pages 部署版
+一个纯AI搓出来的东西：https://liwangyu917813.github.io/personal_testchecker_wangfu/
+只是玩一玩，如有切实需求请访问https://brsexam.approacher.org/ 这个网站更加完善
+
+一下为为AI写的readme
+# 期中考试个人看板
 
 ## 仓库结构
 ```
@@ -8,12 +11,6 @@ xlsx.full.min.js    SheetJS 解析库（本地文件，勿删）
 core.js / app.js    页面逻辑（与 index.html 同目录即可）
 data/exam.xlsx      考试数据（管理员每学期覆盖上传这一份文件即可）
 ```
-
-## 首次部署（纯网页操作，无需 git）
-1. GitHub 新建一个仓库（Public）
-2. 把本目录全部内容上传（Add file → Upload files，可整批拖入）
-3. Settings → Pages → Branch 选 main（或 master）→ Save
-4. 约 1 分钟后访问 https://<用户名>.github.io/<仓库名>/
 
 ## 每学期更新（运营者唯一要做的动作）
 - 打开仓库 → data/ → 把新的监考表改名为 exam.xlsx 覆盖上传 → Commit
