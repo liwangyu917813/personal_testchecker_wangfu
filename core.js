@@ -801,6 +801,20 @@ function _P6_buildRecords(ctx) {
     const grade = row[colIdx.grade] != null ? String(row[colIdx.grade]).trim() : '';
     const klass = row[colIdx.klass] != null ? String(row[colIdx.klass]).trim() : '';
 
+    // 监考老师提取（v7）：proctor1/proctor2 列；同格多人（换行/顿号/逗号分隔）拆分。
+    // 合并单元格已由 P1 的 mergedMap 展开到 grid，监考列的纵向合并天然生效。
+    const proctors = [];
+    for (const pc of [colIdx.proctor1, colIdx.proctor2]) {
+      if (pc == null || pc < 0) continue;
+      const pv = row[pc];
+      if (pv === undefined || pv === null) continue;
+      const sRaw = String(pv).trim();
+      if (!sRaw || /^(监考|Proctor)(1|2)?$/i.test(sRaw)) continue;   // 表头行残留
+      for (const piece of sRaw.split(/[、，;；,\n\r]+/).map((x) => x.trim()).filter(Boolean)) {
+        if (!proctors.includes(piece)) proctors.push(piece);
+      }
+    }
+
     // 冗余交叉验证：报名人数列 vs 实际学生名单数 —— 两者不一致提示可能漏名单
     if (colIdx.count >= 0) {
       const cv = row[colIdx.count];
@@ -827,6 +841,7 @@ function _P6_buildRecords(ctx) {
       klass: klass,
       room: room || '（未标注）',
       students: students,
+      proctors: proctors,
       repairedFrom: entry.dateRepaired ? entry.dateRepaired.from : null,
       _row: r + 1,
     });
@@ -865,6 +880,54 @@ function _P7_finalize(ctx) {
 
 
 /* ---------- 按姓名查找 ---------- */
+
+/**
+ * 模糊匹配打分（v7）：输入 query 相对姓名 name 的贴合程度，分数越高越靠前。
+ *   100  姓名以输入开头（"王艺" vs "王艺睿"——前缀是最强信号）
+ *    80  输入的字符在姓名中连续出现（非开头，如 "艺睿"）
+ *     80 - 起始位置  姓名中段命中（越靠前分越高）
+ *     10  乱序全字符命中（每个字都在，顺序不同）
+ *     0   其他（双向子串但未覆盖上述情形的兜底）
+ * @param {string} name  归一化后的名单姓名
+ * @param {string} query 归一化后的用户输入
+ * @returns {number} 分数
+ */
+function scoreMatch(name, query) {
+  if (!query) return 0;
+  if (name === query) return 200;
+  if (name.startsWith(query)) return 100;
+  const idx = name.indexOf(query);
+  if (idx > 0) return Math.max(1, 80 - idx);
+  // 乱序：每个字符都出现（仅在调用方已确认无子串命中时作为兜底，这里给出低分）
+  let all = true;
+  for (const ch of query) if (!name.includes(ch)) { all = false; break; }
+  return all ? 10 : 0;
+}
+
+/**
+ * 单场考试详情（v7，公开 API，供 UI「点击查看详情」弹层调用）。
+ * 返回该场的完整信息：时间/地点/年级班级 + 监考老师（proctors）+ 同场全部学生。
+ * @param {{exams:Array}} parsed parseWorkbook 的返回值
+ * @param {number|string} indexOrRef 考试在 parsed.exams 中的下标，或带 _row 的考试对象
+ * @returns {object|null} 详情对象；无效输入返回 null（调用方自行兜底）
+ */
+function getExamDetail(parsed, indexOrRef) {
+  if (!parsed || !Array.isArray(parsed.exams)) return null;
+  let ex = null;
+  if (typeof indexOrRef === 'number' && parsed.exams[indexOrRef]) ex = parsed.exams[indexOrRef];
+  else if (indexOrRef && typeof indexOrRef === 'object' && typeof indexOrRef._row === 'number') {
+    ex = parsed.exams.find((e) => e._row === indexOrRef._row) || null;
+  }
+  if (!ex) return null;
+  return {
+    date: ex.date, weekday: ex.weekday, time: ex.time, minutes: ex.minutes,
+    subject: ex.subject, grade: ex.grade, klass: ex.klass, room: ex.room,
+    proctors: Array.isArray(ex.proctors) ? ex.proctors.slice() : [],
+    students: Array.isArray(ex.students) ? ex.students.slice() : [],
+    repairedFrom: ex.repairedFrom || null,
+    sourceRow: ex._row,
+  };
+}
 
 /**
  * 按姓名查找考试（公开 API，供 UI 层调用）。
@@ -929,7 +992,9 @@ function findExamsForStudent(parsed, rawName) {
     };
   }
 
-  // 部分匹配（含大小写/全半角容错）：输入为名单子串，或名单为输入子串
+  // 部分匹配（含大小写/全半角容错）：输入为名单子串，或名单为输入子串。
+  // v7 强化：任意子串命中即列出（"王"→所有含王的姓名）；再叠加逐字连续匹配打分，
+  // 输入的字符在姓名中越靠前、越连续，排序越靠前（"王艺"排在"王宇航"前面）。
   const partial = [];
   const seen = new Set();
   for (const ex of parsed.exams) {
@@ -937,14 +1002,27 @@ function findExamsForStudent(parsed, rawName) {
       const ns = normalizeName(st);
       if (!ns) continue;
       if (ns.includes(name) || name.includes(ns)) {
-        if (!seen.has(ns)) { seen.add(ns); partial.push({ student: st, norm: ns, examCount: 0 }); }
+        if (!seen.has(ns)) { seen.add(ns); partial.push({ student: st, norm: ns, examCount: 0, score: scoreMatch(ns, name) }); }
+      }
+    }
+  }
+  // 冗余兜底：子串双向匹配无结果时，退化为"输入的每个字符都出现在姓名中"（乱序命中，
+  // 如 "王睿" 命中 "王艺睿"），score 更低排在后面，确保能找到但排序合理。
+  if (!partial.length && name.length >= 2) {
+    for (const ex of parsed.exams) {
+      for (const st of ex.students) {
+        const ns = normalizeName(st);
+        if (!ns || seen.has(ns)) continue;
+        let ok = true;
+        for (const ch of name) if (!ns.includes(ch)) { ok = false; break; }
+        if (ok) { seen.add(ns); partial.push({ student: st, norm: ns, examCount: 0, score: scoreMatch(ns, name) }); }
       }
     }
   }
   for (const p of partial) {
     p.examCount = parsed.exams.filter((ex) => ex.students.some((st) => normalizeName(st) === p.norm)).length;
   }
-  partial.sort((a, b) => a.norm.localeCompare(b.norm));
+  partial.sort((a, b) => (b.score - a.score) || a.norm.localeCompare(b.norm));
   if (partial.length) return { status: 'partial', candidates: partial };
 
   return { status: 'not-found' };
@@ -952,7 +1030,7 @@ function findExamsForStudent(parsed, rawName) {
 
 /* ---------- 导出 ---------- */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseWorkbook, findExamsForStudent, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
+  module.exports = { parseWorkbook, findExamsForStudent, getExamDetail, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
 } else if (typeof window !== 'undefined') {
-  window.ExamCore = { parseWorkbook, findExamsForStudent, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
+  window.ExamCore = { parseWorkbook, findExamsForStudent, getExamDetail, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
 }

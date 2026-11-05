@@ -53,6 +53,67 @@
     }
   }
 
+  /** v7：候选名单构建（doQuery 的 partial 分支与输入框实时联想共用）。
+   *  每个候选按钮显示 姓名（N 场）+ 匹配徽标（前缀/包含/同字）；点击即查该同学。 */
+  function buildCandidateList(candidates, typedName, titleHtml) {
+    const wrap = document.createElement('div');
+    if (titleHtml) {
+      const t = document.createElement('div');
+      t.className = 'title';
+      t.innerHTML = titleHtml;
+      wrap.appendChild(t);
+    }
+    // 候选过多时只显示前 60 个（极端输入如单字"王"可能命中上百人），提示可用更长的输入缩小范围
+    const MAX_SHOW = 60;
+    candidates.slice(0, MAX_SHOW).forEach((c) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      const tag = c.score >= 100 ? '前缀' : (c.score >= 10 ? '同字' : '包含');
+      b.innerHTML = escapeHtml(c.student) + '<span class="candCount">' + c.examCount + ' 场</span>' +
+        '<span class="candTag">' + tag + '</span>';
+      b.addEventListener('click', () => {
+        $('nameInput').value = c.student;
+        try { localStorage.setItem(LS_KEY, c.student); } catch (e) { /* 忽略 */ }
+        const r2 = ExamCore.findExamsForStudent(parsed, c.student);
+        if (r2.status === 'found') { showMsg('queryMsg', '', ''); renderBoard(c.student, r2.hits.map((h) => h.exam)); }
+        else if (r2.status === 'partial') { showMsg('queryMsg', 'info', '「' + escapeHtml(c.student) + '」仍有多个匹配：'); doQuery(); }
+      });
+      wrap.appendChild(b);
+    });
+    if (candidates.length > MAX_SHOW) {
+      const more = document.createElement('div');
+      more.className = 'candMore';
+      more.textContent = '共 ' + candidates.length + ' 位候选人，已显示前 ' + MAX_SHOW + ' 位——输入更多字可缩小范围';
+      wrap.appendChild(more);
+    }
+    return wrap;
+  }
+
+  /** v7：输入框实时联想（debounce 160ms）。输入 ≥1 个字符即列出候选，完整姓名直接查。 */
+  let suggestTimer = null;
+  function onNameInputLive() {
+    if (suggestTimer) clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(() => {
+      if (!guardParsed()) return;
+      const name = $('nameInput').value.trim();
+      const box = $('candList');
+      if (!name) { box.innerHTML = ''; showMsg('queryMsg', '', ''); return; }
+      let res;
+      try { res = ExamCore.findExamsForStudent(parsed, name); } catch (e) { return; }
+      if (res.status === 'partial') {
+        showMsg('queryMsg', 'info', '找到 ' + res.candidates.length + ' 位含「' + escapeHtml(name) + '」的同学（点击选择）：');
+        box.innerHTML = '';
+        box.appendChild(buildCandidateList(res.candidates, name, ''));
+      } else if (res.status === 'found') {
+        // 完整命中：清掉联想（用户按回车或点查询按钮时才渲染看板，避免打字过程中页面跳动）
+        box.innerHTML = '';
+        showMsg('queryMsg', '', '');
+      } else if (res.status === 'not-found') {
+        box.innerHTML = '';
+      }
+    }, 160);
+  }
+
   function showParseError(err) {
     parsed = null;
     $('fileChosen').classList.add('hidden');
@@ -202,6 +263,8 @@
   /* ---------- 步骤 2：查询 ---------- */
   $('goBtn').addEventListener('click', doQuery);
   $('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') doQuery(); });
+  // v7：输入即联想（防抖 160ms），写"王"立刻列出所有含"王"的同学
+  $('nameInput').addEventListener('input', onNameInputLive);
 
   // 记住上次查询的姓名（localStorage，仅本机）
   const LS_KEY = 'examBoard.lastName';
@@ -231,20 +294,10 @@
       return;
     }
     if (res.status === 'partial') {
-      showMsg('queryMsg', 'info',
-        '没有找到与「' + escapeHtml(name.trim()) + '」完全一致的姓名，以下是相近的候选（点击选择）：');
       const box = $('candList');
       box.innerHTML = '';
-      res.candidates.forEach((c) => {
-        const b = document.createElement('button');
-        b.textContent = c.student + '（' + c.examCount + ' 场）';
-        b.addEventListener('click', () => {
-          $('nameInput').value = c.student;
-          const r2 = ExamCore.findExamsForStudent(parsed, c.student);
-          if (r2.status === 'found') { showMsg('queryMsg', '', ''); renderBoard(c.student, r2.hits.map((h) => h.exam)); }
-        });
-        box.appendChild(b);
-      });
+      box.appendChild(buildCandidateList(res.candidates, name.trim(),
+        '没有找到与「' + escapeHtml(name.trim()) + '」完全一致的姓名，以下是相近的候选（点击选择）：'));
       return;
     }
     showMsg('queryMsg', 'error',
@@ -337,16 +390,17 @@
         (isToday ? '<span class="todayBadge">今天</span>' : '') + '</div>';
       for (const ex of g.items) {
         const idx = exams.indexOf(ex);
-        const cls = 'examCard' + (ex._past ? ' past' : '') + (ex._now ? ' isNow' : '') + (idx === nextIdx && !ex._now ? ' next' : '');
+        const cls = 'examCard clickable' + (ex._past ? ' past' : '') + (ex._now ? ' isNow' : '') + (idx === nextIdx && !ex._now ? ' next' : '');
         const dur = ex.minutes ? '<span class="dur">时长 ' + ex.minutes + ' 分钟</span>' : '';
         const nowB = ex._now ? '<span class="nowBadge">● 进行中</span>' : '';
         const nextB = (idx === nextIdx && !ex._now) ? '<span class="nextBadge">← 下一场</span>' : '';
         const fixB = ex.repairedFrom ? '<span class="fixBadge" title="原表日期为 ' + escapeHtml(ex.repairedFrom) + '，因脱离考试日期连续段且符合日期尾零丢失特征已自动修正">🛠 日期已修正</span>' : '';
-        html += '<div class="' + cls + '">' +
+        // v7：点击卡片弹出本场详情（监考老师 + 同场学生）。data-idx 关联 parsed.exams 下标。
+        html += '<div class="' + cls + '" data-exidx="' + idx + '" title="点击查看本场详情（监考老师 / 同场考生）">' +
           '<div class="time">' + escapeHtml(ex.time) + dur + '</div>' +
           '<div><div class="subj">' + escapeHtml(ex.subject) + nowB + nextB + fixB + '</div>' +
           '<div class="meta">' + buildMeta(ex) + '</div></div>' +
-          '<div class="roomTag">📍 ' + escapeHtml(ex.room) + '</div>' +
+          '<div class="roomTag">📍 ' + escapeHtml(ex.room) + '<span class="detailHint">详情 ›</span></div>' +
           '</div>';
       }
       html += '</div>';
@@ -364,6 +418,14 @@
       parsed.meta.totalRows + ' 场考试参与匹配</div>';
 
     board.innerHTML = html;
+    // v7：事件委托绑定卡片点击 → 详情弹层（比逐卡绑定更省，且打印前重渲染也安全）
+    board.addEventListener('click', (ev) => {
+      const cardEl = ev.target.closest ? ev.target.closest('.examCard.clickable') : null;
+      if (!cardEl) return;
+      const idx = parseInt(cardEl.getAttribute('data-exidx'), 10);
+      if (!Number.isInteger(idx)) return;
+      openExamDetail(idx, name);
+    });
     // 复制为纯文本（冗余出口：打印之外再给一个分享渠道）
     const copyBtn = document.getElementById('copyBtn');
     if (copyBtn) {
@@ -437,6 +499,74 @@
     board.classList.remove('hidden');
     board.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+
+  /** v7：详情弹层。点击考试卡片 → 展示监考老师 + 同场考生 + 完整信息。
+   *  渲染在独立遮罩层，Esc / 点遮罩 / 关闭按钮均可退出；学生名单点击可直接查该同学。 */
+  function openExamDetail(idx, queryName) {
+    const d = ExamCore.getExamDetail(parsed, idx);
+    if (!d) return;   // 冗余防护：数据结构异常时静默退出，不影响看板
+    // 遮罩层只建一次，重复调用复用
+    let overlay = document.getElementById('detailOverlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'detailOverlay';
+      overlay.innerHTML =
+        '<div class="detailMask"></div>' +
+        '<div class="detailModal" role="dialog" aria-modal="true">' +
+        '  <button class="detailClose" id="detailClose" title="关闭 (Esc)">✕</button>' +
+        '  <div id="detailBody"></div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', (ev) => {
+        if (ev.target.classList.contains('detailMask') || ev.target.id === 'detailClose') closeExamDetail();
+      });
+      document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeExamDetail(); });
+    }
+    const body = overlay.querySelector('#detailBody');
+    const headRow = '<div class="dtDate">' + escapeHtml(d.date) + '（' + escapeHtml(d.weekday) + '）' +
+      '<span class="dtTime">' + escapeHtml(d.time) +
+      (d.minutes ? ' · 共 ' + d.minutes + ' 分钟' : '') + '</span>' +
+      (d.repairedFrom ? '<span class="fixBadge" title="原表日期为 ' + escapeHtml(d.repairedFrom) + '">🛠 已修正（原 ' + escapeHtml(d.repairedFrom) + '）</span>' : '') +
+      '</div>';
+    const metaRow = '<div class="dtMeta">' +
+      '<span class="dtSubject">' + escapeHtml(d.subject) + '</span>' +
+      '<span class="dtRoom">📍 ' + escapeHtml(d.room) + '</span>' +
+      (d.grade ? '<span class="dtTag">年级 ' + escapeHtml(d.grade) + '</span>' : '') +
+      (d.klass ? '<span class="dtTag">' + escapeHtml(d.klass) + '</span>' : '') +
+      '</div>';
+    const proctorsHtml = '<div class="dtSection"><div class="dtSecTitle">👩‍🏫 监考老师（' + d.proctors.length + '）</div>' +
+      (d.proctors.length
+        ? '<div class="dtChips">' + d.proctors.map((p) => '<span class="dtChip proctor">' + escapeHtml(p) + '</span>').join('') + '</div>'
+        : '<div class="dtNone">原表未标注本场监考老师</div>') +
+      '</div>';
+    const studentsHtml = '<div class="dtSection"><div class="dtSecTitle">🧑‍🎓 同场考生（' + d.students.length + ' 人）' +
+      '<span class="dtSecHint">点击姓名可查询该同学的考试</span></div>' +
+      '<div class="dtChips">' + d.students.map((st) =>
+        '<span class="dtChip student" data-name="' + escapeHtml(st) + '">' + escapeHtml(st) + '</span>').join('') + '</div>' +
+      '</div>';
+    body.innerHTML = headRow + metaRow + proctorsHtml + studentsHtml;
+    // 学生名单可点击 → 关弹层 + 直接查该同学（复用主查询流程，记住姓名逻辑同步生效）
+    body.querySelectorAll('.dtChip.student').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const nm = chip.getAttribute('data-name') || '';
+        closeExamDetail();
+        $('nameInput').value = nm;
+        doQuery();
+      });
+    });
+    overlay.classList.add('open');
+    document.body.classList.add('modalOpen');   // 锁定背景滚动
+    const closeBtn = overlay.querySelector('#detailClose');
+    if (closeBtn) closeBtn.focus();
+  }
+
+  function closeExamDetail() {
+    const overlay = document.getElementById('detailOverlay');
+    if (overlay) overlay.classList.remove('open');
+    document.body.classList.remove('modalOpen');
+  }
+  // 供外部（如控制台调试）安全关闭
+  window.__examDetailClose = closeExamDetail;
 
   /** 单场考试卡片右侧元信息（星期/时长/倒计时文案） */
   function buildMeta(ex) {
