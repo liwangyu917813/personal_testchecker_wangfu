@@ -1,8 +1,20 @@
 /* =====================================================================
- * 考试查询核心逻辑 (core.js)  v2 —— 增强容错版
+ * 考试查询核心逻辑 (core.js)  v5 —— 流水线架构版
  * 职责：解析监考表 XLSX -> 结构化考试数组 -> 按姓名查找
  * 设计原则：任何异常都给出明确中文提示，绝不静默出错；
  *           对日期、时间、表头、姓名均做多重冗余识别。
+ *
+ * 架构（v5 重构）：parseWorkbook 是一条 7 阶段流水线，
+ *   _P1_selectSheet   选数据表 + 展开合并单元格 -> grid
+ *   _P2_findHeader    表头行定位（前 30 行关键词打分）
+ *   _P3_mapColumns    列识别（宽松匹配 + 标准列序兜底）
+ *   _P4_collectDates  日期第一遍收集 + 投票定基准月
+ *   _P5_repairDates   日期同值共享 + 出现顺序贪心修正
+ *   _P55_coherence    连贯性分析（×10 尾零认领 + 歧义回滚）
+ *   _P6_buildRecords  记录构建（名单拆分/时间/分钟/考场/去重）
+ *   _P7_finalize      排序 + 汇总 + 组装返回值
+ * 阶段间通过 ctx 对象传递：数组/对象字段共享引用，标量经 Object.assign 写回。
+ * 每个阶段职责单一，可独立测试；阶段函数以 _P 前缀标识内部实现。
  * ===================================================================== */
 
 'use strict';
@@ -17,12 +29,14 @@ function normalizeName(s) {
   return t.replace(/[\s\u00B7\u2022\u2027·''''"""]/g, '').trim().toLowerCase();
 }
 
+/** 全角字符转半角（数字、字母、冒号、波浪线等），提高各种输入法的容错 */
 function fullWidthToAscii(s) {
   return String(s).replace(/[\uFF01-\uFF5E\u3000]/g, (ch) =>
     ch === '\u3000' ? ' ' : String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
     .replace(/[\uFF0D\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFF0F]/g, '-'); // 全角横线/各类破折号/全角斜杠 -> '-'
 }
 
+/** 判断 grid 一行是否为空行（前 11 列全空）——用于静默跳过，不产生警告 */
 function isEmptyDataRow(row) {
   for (let c = 0; c < Math.min(11, row.length); c++) {
     const v = row[c];
@@ -97,10 +111,15 @@ function minutesFromRange(rangeStr) {
  */
 
 function toSerial(dt) { return Date.UTC(dt.y, dt.m - 1, dt.d) / 86400000; }
+/** 日期对象 -> 中文短描述（"11月10日"，警告与修正记录用） */
 function describeDate(dt) { return dt.m + '月' + dt.d + '日'; }
 
 // 生成候选（不含年份，之后统一补）：[{m, d, literal, y?}]，按可信度排序
 function candsFromParts(a, b, baseMonth, allowZeroRecover) {
+  // 冗余校验：字面月/日越界（m>12 或 m<1 或 d>31 或 d<1）直接判为无法识别的日期。
+  // 之前 "13.5" 会被静默交换成 5月13日——这对监考表是危险的猜测（真实含义更可能是录错的月份），
+  // 现在返回 null → 上层统一给"无法识别日期，该行将被跳过"警告。
+  if (a < 1 || a > 12 || b < 1 || b > 31) return null;
   const out = [];
   const push = (m, d, literal) => {
     if (m >= 1 && m <= 12 && d >= 1 && d <= 31 && !out.some((c) => c.m === m && c.d === d)) {
@@ -111,11 +130,11 @@ function candsFromParts(a, b, baseMonth, allowZeroRecover) {
   if (baseMonth != null && a !== b && b === baseMonth && a !== baseMonth) {
     push(b, a, true);                                 // 交换 D.M 后命中基准月（如 "9.11"=11月9日）
   }
+  if (baseMonth != null && a > 12 && b >= 1 && b <= 12) {
+    push(b, a, true);                                 // 首数>12：必为 D.M（"13.5"=5月13日），即使无基准月也给出候选并标记越界月
+  }
   if (allowZeroRecover && b >= 1 && b <= 3) {
     push(a, b * 10, false);                           // 尾零丢失恢复：11.1 → 可能是 11.10
-  }
-  if (a > 12 && b <= 12 && out.length === 0) {
-    push(b, a, true);                                 // 首数>12 必为 D.M
   }
   if (!out.length) return null;
   // 排序：基准月优先 > 字面义优先（稳定）
@@ -211,6 +230,10 @@ function rawDateCands(v, baseMonth) {
   return null;
 }
 
+/**
+ * 跨年学年推断：8 月及以后属 inputYear 年（上学期），7 月及以前属 inputYear+1（下学期）。
+ * 例：inputYear=2026 时 12.20 → 2026-12-20，1.5 → 2027-01-05。
+ */
 function resolveYear(month, baseMonth, inputYear) {
   // 学期年份按"该日期自身的月份"判断（而不是全表基准月）：
   //   8月~12月 -> 当年（秋季学期）；1月~7月 -> 学期跨年，次年。
@@ -220,15 +243,29 @@ function resolveYear(month, baseMonth, inputYear) {
   return inputYear;
 }
 
+/** 给不含年份的候选补年份（跨年规则见 resolveYear；已带 y 的候选原样保留） */
+/** 数字年月日 -> "M月D日"（警告文案用） */
+function label0(m, d) { return m + '.' + d; }
+
 function withYear(cand, baseMonth, inputYear) {
-  return { y: cand.y != null ? cand.y : resolveYear(cand.m, baseMonth, inputYear), m: cand.m, d: cand.d };
+  // 冗余校验：字面日期必须是真实存在的日历日（2.30/4.31 这类不存在）。
+  // 解析内部序列号计算不会崩溃，但输出的 "2026-02-30" 是幻觉日期，标记供警告。
+  const DIM = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const maxD = cand.m === 2 ? 29 : DIM[cand.m - 1];
+  return {
+    y: cand.y != null ? cand.y : resolveYear(cand.m, baseMonth, inputYear),
+    m: cand.m, d: cand.d,
+    invalidDay: cand.d > maxD,
+  };
 }
 
+//** 数字年月日 -> "YYYY-MM-DD"（补零） */
 function fmtDate(y, m, d) {
   return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
 }
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+/** "YYYY-MM-DD" -> "周X"（本地时区安全解析） */
 function weekdayCN(dateStr) {
   const dt = new Date(dateStr + 'T00:00:00');
   return WEEKDAYS[dt.getDay()];
@@ -238,6 +275,10 @@ function weekdayCN(dateStr) {
 function decode_range(ref) { return XLSX.utils.decode_range(ref); }
 function encode_cell(addr) { return XLSX.utils.encode_cell(addr); }
 
+/**
+ * 展开工作表合并单元格：返回 Map<"r,c" 地址, 左上角值>。
+ * 合并区域内的每个格子都能取到日期/年级等合并值（监考表日期列大量使用合并）。
+ */
 function buildMergedMap(ws) {
   const map = new Map();
   const merges = ws['!merges'] || [];
@@ -255,12 +296,100 @@ function buildMergedMap(ws) {
 
 /* ---------- 主流程：解析工作簿 ---------- */
 
+/* ---------- 主流程：解析工作簿（7 阶段流水线） ----------
+ * 阶段间数据通过 ctx 传递；数组/对象字段为共享引用，标量字段经 Object.assign 写回。
+ * ctx 字段清单：
+ *   输入：wb, options, inputYear
+ *   累积：warnings, repairs
+ *   P1 产物：sheetName, ws, mergedMap, grid
+ *   P2/P3 产物：headerRow, colIdx
+ *   P4 产物：dateRows, baseMonth
+ *   P5 产物：distinct, byKey（repairs 同累积）
+ *   P6 产物：exams, seenKeys
+ *   P7 产物：dateList（并返回 meta 对象） */
 function parseWorkbook(wb, options) {
-  options = options || {};
-  const inputYear = options.year || new Date().getFullYear();
-  const warnings = [];
+  // 输入防御：非对象/null/无 SheetNames 的输入给出中文错误，而不是裸的内部异常
+  if (!wb || typeof wb !== 'object' || !Array.isArray(wb.SheetNames) || !wb.Sheets || typeof wb.Sheets !== 'object') {
+    throw new Error('传入的数据不是有效的 Excel 工作簿（缺少工作表），请重新选择正确的 .xlsx 文件。');
+  }
+  const ctx = {
+    wb: wb,
+    options: options || {},
+    inputYear: (options && options.year) || new Date().getFullYear(),
+    warnings: [],
+    repairs: [],
+    exams: [],
+    seenKeys: new Set(),
+    byKey: new Map(),
+    distinct: [],
+    dateRows: [],
+    colIdx: null,
+    headerRow: -1,
+    baseMonth: null,
+    sheetName: null,
+    ws: null,
+    grid: null,
+    mergedMap: null,
+    dateList: [],
+  };
+  _P1_selectSheet(ctx);
+  _P2_findHeader(ctx);
+  _P3_mapColumns(ctx);
+  _P4_collectDates(ctx);
+  _P5_repairDates(ctx);
+  _P55_coherence(ctx);
+  _P6_buildRecords(ctx);
+  const meta = _P7_finalize(ctx);
+  _verifyParse(ctx, meta);          // 解析后自检（双保险）：异常结果给出明确警告
+  return meta;
+}
 
-  // 1. 选数据表：优先命中表头关键词的表，否则取行数最多的表
+/* ---------- 解析后自检（双保险冗余） ---------- */
+/**
+ * 流水线结束后的健全性检查：不改变解析结果，只对"可疑但未触发异常"的输出
+ * 追加警告，让 UI 有机会提示用户核对——宁可多提醒，不可静默出错。
+ * 检查项：
+ *   1. 有 grid 有表头却 0 场考试 → 疑似学生列识别错误
+ *   2. 全部考试都没有学生 → 疑似名单列错位
+ *   3. 警告数超过考试数的一半 → 数据质量差，提示人工核对
+ *   4. 单场考试学生数 > 200 → 疑似名单列拼接异常
+ * @param {object} ctx   流水线上下文
+ * @param {{exams:Array,meta:object}} meta  _P7_finalize 返回值
+ */
+function _verifyParse(ctx, meta) {
+  try {
+    const exams = meta.exams, grid = ctx.grid, headerRow = ctx.headerRow, warnings = meta.meta.warnings;
+    // 1) 找到了表头和网格，却没有任何有效考试行 → 最可能是学生列错位或名单全空
+    if (exams.length === 0 && grid && headerRow >= 0 && grid.length - headerRow > 3) {
+      warnings.push('自检：找到了表头（第 ' + (headerRow + 1) + ' 行）但没解析出任何考试记录，可能是学生名单列不在此表中，请人工核对列位置。');
+      return;
+    }
+    if (exams.length === 0) return;   // 其余 0 场场景已由主流程抛错/警告，不重复
+    // 2) 抽查：统计"没有任何学生"的占比（正常监考表每场都应有学生）
+    let noStudents = 0;
+    for (const ex of exams) if (!ex.students || !ex.students.length) noStudents++;
+    if (noStudents === exams.length) {
+      warnings.push('自检：所有 ' + exams.length + ' 场考试都没有学生名单，请确认学生列位置是否正确。');
+    }
+    // 3) 警告数量异常多 → 提示整体数据质量
+    if (warnings.length > Math.max(20, exams.length / 2)) {
+      warnings.push('自检：数据警告多达 ' + warnings.length + ' 条，表格格式可能差异较大，建议对照原件人工核对。');
+    }
+    // 4) 单场学生数异常（>200 视为名单被挤成一格）
+    const big = exams.filter((ex) => ex.students && ex.students.length > 200);
+    if (big.length) {
+      warnings.push('自检：有 ' + big.length + ' 场考试的学生数超过 200 人（如 "' +
+        String(big[0].subject) + '" 有 ' + big[0].students.length + ' 人），疑似多名学生的名单被挤在同一格且未按预期拆分，请核对。');
+    }
+  } catch (e) {
+    // 自检本身绝不能影响解析结果
+    try { ctx.warnings.push('自检过程出错（不影响解析结果）：' + e.message); } catch (e2) { /* 忽略 */ }
+  }
+}
+
+/* P1 · 选数据表：优先命中表头关键词的表，否则取行数最多的表；随后展开合并单元格构建 grid */
+function _P1_selectSheet(ctx) {
+    const wb = ctx.wb;
   let sheetName = null, ws = null, bestRows = -1;
   for (const name of wb.SheetNames) {
     const w = wb.Sheets[name];
@@ -276,7 +405,7 @@ function parseWorkbook(wb, options) {
     if (headerHit) { sheetName = name; ws = w; break; }
     const nrows = ref.e.r + 1;
     if (nrows > bestRows) { bestRows = nrows; sheetName = name; ws = w; }
-  }
+}
   if (!ws) throw new Error('未找到包含数据的工作表（Sheet），请确认提交的是监考表原件。');
 
   const mergedMap = buildMergedMap(ws);
@@ -291,9 +420,14 @@ function parseWorkbook(wb, options) {
       row.push(v);
     }
     grid.push(row);
-  }
+}
 
-  // 2. 表头行：前 30 行中命中关键词最多（>=2）的行（表头可能不在文件顶部，
+
+    Object.assign(ctx, { sheetName, ws, mergedMap, grid });
+}
+/* P2 · 表头行定位：前 30 行中命中关键词最多（>=2）的行 */
+function _P2_findHeader(ctx) {
+    const grid = ctx.grid;
   //    例如前面有标题行、空行、说明行、多级表头）
   const KEYWORDS = [/日期|Date/i, /时间|Time/i, /课程|科目|Subject/i, /考场|教室|地点|Room|Venue/i, /监考|Proctor/i, /学生|考生|Student/i];
   let headerRow = -1, headerScore = 0;
@@ -302,10 +436,15 @@ function parseWorkbook(wb, options) {
     let score = 0;
     for (const kw of KEYWORDS) if (kw.test(joined)) score++;
     if (score >= 2 && score > headerScore) { headerRow = i; headerScore = score; }
-  }
+}
   if (headerRow < 0) throw new Error('未找到表头行（需要同时包含"日期、时间、课程"等字样）。请确认提交的是标准监考表。');
 
-  // 3. 列识别（宽松匹配 + 兜底推断）
+
+    Object.assign(ctx, { headerRow });
+}
+/* P3 · 列识别：宽松匹配 + 标准列序兜底 + 学生列位置推断 */
+function _P3_mapColumns(ctx) {
+    const grid = ctx.grid, headerRow = ctx.headerRow, warnings = ctx.warnings;
   const hdr = grid[headerRow];
   const htext = hdr.map((c) => String(c == null ? '' : c));
   const findCol = (res) => {
@@ -340,7 +479,7 @@ function parseWorkbook(wb, options) {
     for (const k of ['date', 'time', 'subject']) if (colIdx[k] < 0 || colIdx[k] == null) still.push(k);
     if (still.length) throw new Error('表头缺少关键列：' + still.join('、') + '。请确认提交的是标准监考表（需含 日期/时间/课程名称 列）。');
     warnings.push('表头部分列未能按名称识别，已按标准列序（日期/时间/课程）推断解析。');
-  }
+}
   if (colIdx.students < 0) {
     // 学生列兜底：人数列之后；再不行取已识别列的最大列号 + 1
     let start = colIdx.count >= 0 ? colIdx.count + 1 : -1;
@@ -351,15 +490,20 @@ function parseWorkbook(wb, options) {
     }
     colIdx.students = start;
     warnings.push('未找到"学生"列表头，已按第 ' + (start + 1) + ' 列起作为学生名单解析。');
-  }
+}
 
-  // 4. 第一遍：收集日期单元格 -> 基准月份
+
+    Object.assign(ctx, { colIdx });
+}
+/* P4 · 日期第一遍：收集日期单元格 → 投票定基准月 baseMonth */
+function _P4_collectDates(ctx) {
+    const grid = ctx.grid, headerRow = ctx.headerRow, colIdx = ctx.colIdx, warnings = ctx.warnings;
   const dateRows = [];   // {row(0-based), raw, key}
   for (let r = headerRow + 1; r < grid.length; r++) {
     const dv = grid[r][colIdx.date];
     if (dv === undefined || dv === null || String(dv).trim() === '') continue;
     dateRows.push({ row: r, raw: dv });
-  }
+}
   const monthTally = {};
   for (const dr of dateRows) {
     const cands = rawDateCands(dr.raw, null);
@@ -378,13 +522,31 @@ function parseWorkbook(wb, options) {
         if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) monthTally[mm] = (monthTally[mm] || 0) + 1;
       }
     }
-  }
+}
   let baseMonth = null, best = 0;
   for (const m of Object.keys(monthTally)) {
     if (monthTally[m] > best) { best = monthTally[m]; baseMonth = +m; }
+}
+  // 双保险兜底：投票失败（全表日期都无法识别月份）时，用第一行的时间/科目旁证推断不可行，
+  // 则取第一个能解析出候选的日期的月份作为基准月——"全表大概率同月"是监考表的普遍形态。
+  if (baseMonth == null) {
+    for (const dr of dateRows) {
+      const cands = rawDateCands(dr.raw, null);
+      if (cands && cands[0] && cands[0].m) { baseMonth = cands[0].m; break; }
+      // MMDD 整数兜底
+      if (typeof dr.raw === 'number' && Number.isInteger(dr.raw) && dr.raw >= 101 && dr.raw <= 1231) {
+        const mm = Math.floor(dr.raw / 100), dd = dr.raw % 100;
+        if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) { baseMonth = mm; break; }
+      }
+    }
+    if (baseMonth != null) warnings.push('日期月份投票未能确定基准月，已按首个可识别日期的月份（' + baseMonth + ' 月）兜底解析。');
   }
 
-  // 5. 日期顺序修正：同一原始值共享同一解析结果；按出现顺序贪心修正
+  Object.assign(ctx, { dateRows, baseMonth });
+}
+/* P5 · 日期顺序修正：同值共享解析 + 按出现顺序贪心修正（含段末上界与跨年容忍） */
+function _P5_repairDates(ctx) {
+    const dateRows = ctx.dateRows, baseMonth = ctx.baseMonth, inputYear = ctx.inputYear, warnings = ctx.warnings;
   const distinct = [];   // {key, raw, label, cands(含年份)}
   const byKey = new Map();
   for (const dr of dateRows) {
@@ -396,7 +558,16 @@ function parseWorkbook(wb, options) {
         warnings.push('第 ' + (dr.row + 1) + ' 行：无法识别日期 "' + String(dr.raw).trim() + '"，该行将被跳过。');
         byKey.set(key, null);
       } else {
+        // 冗余校验：字面日期必须是真实存在的日历日（2.30/4.31/11.31 这类不存在）
+        // 解析器内部用"日 序列号"计算不会崩溃，但对外输出的 "2026-11-31" 是幻觉日期，
+        // 必须警告提示人工核对（保留原值，不擅自改动）
         const full = cands.map((c) => withYear(c, baseMonth, inputYear));
+        const first = full[0];
+        if (first.invalidDay) {
+          const DIM = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+          const maxD = first.m === 2 ? 29 : DIM[first.m - 1];
+          warnings.push('第 ' + (dr.row + 1) + ' 行：日期 "' + label0(first.m, first.d) + '" 不存在（' + first.m + '月只有 ' + maxD + ' 天），请人工核对原表。');
+        }
         const label = (typeof dr.raw === 'number' ? String(dr.raw) :
           dr.raw instanceof Date ? fmtDate(dr.raw.getFullYear(), dr.raw.getMonth() + 1, dr.raw.getDate()) : String(dr.raw).trim());
         const entry = { key: key, raw: dr.raw, label: label, cands: full, chosen: full[0] };
@@ -405,7 +576,7 @@ function parseWorkbook(wb, options) {
       }
     }
     dr.key = key;
-  }
+}
   const repairs = [];
   let prevSerial = null, prevDesc = null;
   // 段末上界：全表其他日期的最大 serial。顺序修正的候选不得超过它（+跨年容差 45 天），
@@ -417,7 +588,7 @@ function parseWorkbook(wb, options) {
       const s = toSerial(c);
       if (s != null && s > boundSerial) boundSerial = s;
     }
-  }
+}
   for (const entry of distinct) {
     if (!entry) continue;
     // 跨年容忍：若与前序日期差接近一年（学期跨年，如 12月 -> 1月），视为正常推进，不触发顺序修正
@@ -451,8 +622,14 @@ function parseWorkbook(wb, options) {
     entry.chosen = pick;
     prevSerial = toSerial(pick);
     prevDesc = describeDate(pick);
-  }
+}
 
+
+    Object.assign(ctx, { distinct, byKey, repairs });
+}
+/* P5.5 · 连贯性分析：考试日期连续段 + Excel 尾零丢失(×10)认领 + 歧义回滚 */
+function _P55_coherence(ctx) {
+    const distinct = ctx.distinct, repairs = ctx.repairs, warnings = ctx.warnings;
   /* 5.5 考试日期连贯性分析（v4）：考试日期通常连续几天（如 11.9/11.10/11.11）。
    * 若某日期脱离连续段，且符合 Excel 吞尾零特征（11.1 的 ×10=11.10 恰落在连续段范围内），
    * 判定为录入错误并自动修正；无法确定目标时保留原值并警告，绝不猜测。
@@ -546,9 +723,14 @@ function parseWorkbook(wb, options) {
         warnings.push('日期 "' + en.label + '"（' + describeDate(en.chosen) + '）脱离考试日期连续段（' + spanDesc + '），无法确定正确日期，已保留原值，请人工核对。');
       }
     }
-  }
+}
 
-  // 6. 第二遍：构建考试记录
+
+    Object.assign(ctx, { distinct, repairs });
+}
+/* P6 · 记录构建：名单拆分/时间解析/分钟推导/考场提取/去重 */
+function _P6_buildRecords(ctx) {
+    const grid = ctx.grid, headerRow = ctx.headerRow, colIdx = ctx.colIdx, byKey = ctx.byKey, distinct = ctx.distinct, warnings = ctx.warnings;
   const exams = [];
   const seenKeys = new Set();
   for (let r = headerRow + 1; r < grid.length; r++) {
@@ -619,6 +801,17 @@ function parseWorkbook(wb, options) {
     const grade = row[colIdx.grade] != null ? String(row[colIdx.grade]).trim() : '';
     const klass = row[colIdx.klass] != null ? String(row[colIdx.klass]).trim() : '';
 
+    // 冗余交叉验证：报名人数列 vs 实际学生名单数 —— 两者不一致提示可能漏名单
+    if (colIdx.count >= 0) {
+      const cv = row[colIdx.count];
+      const cnt = Number(cv);
+      if (cv != null && String(cv).trim() !== '' && Number.isFinite(cnt) && cnt > 0 &&
+          Math.abs(cnt - students.length) > Math.max(2, cnt * 0.15)) {
+        warnings.push('第 ' + (r + 1) + ' 行：报名人数(' + cnt + ')与实际学生名单数(' + students.length +
+          ')相差较大，可能名单列有遗漏，请人工核对该科目学生名单。');
+      }
+    }
+
     // 冗余去重：完全相同的行（含相同学名单）只保留一条
     const sig = [dateStr, timeStr, subject, grade, klass, room, students.slice().sort().join('§')].join('¦');
     if (seenKeys.has(sig)) continue;
@@ -639,38 +832,50 @@ function parseWorkbook(wb, options) {
     });
   }
 
-  if (!exams.length) throw new Error('解析完成但没有找到任何有效的考试记录。请确认提交的是最新版监考表（需包含学生名单）。');
+  Object.assign(ctx, { exams, seenKeys });
+}
 
+/* P7 · 收尾：排序 + 汇总日期列表 + 组装返回值 */
+function _P7_finalize(ctx) {
+    const exams = ctx.exams, warnings = ctx.warnings, repairs = ctx.repairs, sheetName = ctx.sheetName, baseMonth = ctx.baseMonth, inputYear = ctx.inputYear;
   exams.sort((a, b) => (a.date + ' ' + a.time).localeCompare(b.date + ' ' + b.time));
 
   // 汇总去重后的考试日期（供 UI 展示核对）
   const dateList = [];
-  for (const ex of exams) {
-    if (!dateList.some((x) => x.date === ex.date)) {
-      dateList.push({ date: ex.date, label: describeDate(entryOf(ex.date)) , weekday: ex.weekday });
-    }
-  }
   function entryOf(dateStr) {
     const p = dateStr.split('-');
     return { y: +p[0], m: +p[1], d: +p[2] };
+  }
+  for (const ex of exams) {
+    if (!dateList.some((x) => x.date === ex.date)) {
+      dateList.push({ date: ex.date, label: describeDate(entryOf(ex.date)), weekday: ex.weekday });
+    }
   }
 
   return {
     exams: exams,
     meta: {
-      sheetName: sheetName,
-      baseMonth: baseMonth,
-      inputYear: inputYear,
-      totalRows: exams.length,
-      warnings: warnings,
-      repairs: repairs,
-      dateList: dateList,
+      sheetName: sheetName, baseMonth: baseMonth, inputYear: inputYear,
+      totalRows: exams.length, warnings: warnings, repairs: repairs, dateList: dateList,
     },
   };
 }
 
+
+
+
 /* ---------- 按姓名查找 ---------- */
 
+/**
+ * 按姓名查找考试（公开 API，供 UI 层调用）。
+ * 匹配顺序：精确匹配（归一化后相等）→ 部分匹配（互为子串，返回候选名单）。
+ * 同名检测双信号（避免合考场误报）：
+ *   信号A：非合考场行的"年级|班级基础名"出现多种 → 真同名
+ *   信号B：同一天两场时间区间重叠 → 单人无法同时参加
+ * @param {{exams:Array}} parsed  parseWorkbook 的返回值
+ * @param {string} rawName        用户输入的姓名
+ * @returns {{status:'found'|'partial'|'not-found'|'empty', ...}} 查找结果
+ */
 function findExamsForStudent(parsed, rawName) {
   const name = normalizeName(rawName);
   if (!name) return { status: 'empty' };

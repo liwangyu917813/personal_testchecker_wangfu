@@ -1,5 +1,14 @@
 /* =====================================================================
- * 看板交互逻辑 (app.js) —— 依赖 core.js 提供的 ExamCore / 全局 XLSX
+ * 看板交互逻辑 (app.js) —— 依赖 core.js 暴露的 window.ExamCore / 全局 XLSX
+ *
+ * 架构（v5 整理）：
+ *   状态      parsed / workbook / lastResult / source（模块内闭包持有）
+ *   数据入口  A: tryFetchRemote（自动拉取 data/exam.xlsx）
+ *             B: 手动上传（拖拽/点选，备用路径，file:// 打开时为唯一路径）
+ *             两入口汇聚到 applyParsed(name, parsed, tag)
+ *   查询      doQuery → ExamCore.findExamsForStudent → renderBoard
+ *   渲染      renderBoard（分组/倒计时/徽标/动效） + buildMeta（卡片元信息）
+ *   工具      showMsg / escapeHtml / 日期格式化 / 天数差
  * ===================================================================== */
 'use strict';
 
@@ -55,11 +64,24 @@
 
   /* ---------- 入口 A：打开页面自动加载仓库内的在线数据文件 ---------- */
   const DATA_URL = 'data/exam.xlsx';
+  /** 入口 A：fetch 仓库内 data/exam.xlsx（no-cache，带 2 次重试）；失败时中文提示并进入手动模式 */
   async function tryFetchRemote() {
     const intro = $('dataIntro'), fm = $('fetchMsg');
+    // 冗余：瞬时网络抖动重试 2 次（指数退避 300ms/900ms），只对网络/5xx 类失败重试
+    let resp = null, lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, attempt === 1 ? 300 : 900));
+        resp = await fetch(DATA_URL, { cache: 'no-cache' });
+        if (resp.ok) break;
+        if (resp.status >= 500 || resp.status === 0) { lastErr = new Error('HTTP ' + resp.status); resp = null; continue; }
+        lastErr = new Error('HTTP ' + resp.status);   // 404 等客户端错误：重试无意义
+        resp = null;                                   // 交给下方 throw lastErr 统一报错
+        break;
+      } catch (e) { lastErr = e; resp = null; }       // TypeError（断网/DNS）→ 重试
+    }
     try {
-      const resp = await fetch(DATA_URL, { cache: 'no-cache' });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp) throw lastErr || new Error('网络不可用');
       const buf = await resp.arrayBuffer();
       const wb = XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: false });
       const p = ExamCore.parseWorkbook(wb, { year: new Date().getFullYear() });
@@ -131,27 +153,46 @@
     $('toggleManual').textContent = '手动选择本地文件 →';
   }
 
+  /** 入口 B：读取用户选择的本地文件 → XLSX.read → parseWorkbook → applyParsed。
+   *  双保险：.xls 老格式先直接尝试解析（很多 WPS 导出的 .xls 实际是 xlsx 内容），
+   *  失败才提示转存；非 Excel 扩展名也先尝试，给出内容嗅探的机会。 */
   function handleFile(f) {
     const name = f.name || '';
-    if (!/\.(xlsx|xlsm)$/i.test(name)) {
-      showMsg('parseMsg', 'error', '❌ 只支持 .xlsx 格式的 Excel 文件。老版 .xls 请先在 Excel/WPS 中另存为 .xlsx 再提交。');
+    if (/\.(xlsx|xlsm|xls)$/i.test(name)) {
+      readFileAsWorkbook(f, name);
       return;
     }
+    // 未知扩展名：先试内容，不行再报错（冗余：有些系统导出的文件扩展名不规范）
+    readFileAsWorkbook(f, name, () => showMsg('parseMsg', 'error',
+      '❌ 只支持 .xlsx 格式的 Excel 文件（"' + escapeHtml(name) + '" 无法按 Excel 解析）。' +
+      '老版 .xls 请先在 Excel/WPS 中另存为 .xlsx 再提交。'));
+  }
+
+  function readFileAsWorkbook(f, name, onFail) {
     const reader = new FileReader();
     reader.onerror = () => showMsg('parseMsg', 'error', '❌ 文件读取失败，请重新选择文件再试。');
     reader.onload = (e) => {
       try {
         const data = new Uint8Array(e.target.result);
-        workbook = XLSX.read(data, { type: 'array', cellDates: false });
+        let workbook;
+        try {
+          workbook = XLSX.read(data, { type: 'array', cellDates: false });
+        } catch (readErr) {
+          // 双保险第二路：xlsx 内容可能被包装成 CFB（.xls 容器）——XLSX.read 通常都能处理；
+          // 走到这里说明确实不是 Excel，交给 onFail 或统一错误
+          throw readErr;
+        }
         const p = ExamCore.parseWorkbook(workbook, { year: new Date().getFullYear() });
         applyParsed(name, p, 'manual');
       } catch (err) {
+        if (typeof onFail === 'function') { onFail(); return; }
         showParseError(err);
       }
     };
     reader.readAsArrayBuffer(f);
   }
 
+  /** 统计去重学生总数（跨场次合并） */
   function countStudents(p) {
     const s = new Set();
     p.exams.forEach((ex) => ex.students.forEach((st) => s.add(ExamCore.normalizeName(st))));
@@ -169,8 +210,9 @@
     if (saved) $('nameInput').value = saved;
   } catch (e) { /* 隐私模式等场景忽略 */ }
 
+  /** 查询主流程：空名校验 → 精确/部分匹配 → 同名提示 → 记住姓名 → 渲染看板 */
   function doQuery() {
-    if (!parsed) { showMsg('queryMsg', 'error', '考试数据还没加载好：请等在线数据加载完成，或在上方「手动选择本地文件」提交监考表。'); return; }
+    if (!guardParsed()) { showMsg('queryMsg', 'error', '考试数据还没加载好：请等在线数据加载完成，或在上方「手动选择本地文件」提交监考表。'); return; }
     const name = $('nameInput').value;
     try { localStorage.setItem(LS_KEY, name.trim()); } catch (e) { /* 忽略 */ }
     const res = ExamCore.findExamsForStudent(parsed, name);
@@ -209,6 +251,18 @@
       '❌ 未找到「' + escapeHtml(name.trim()) + '」的任何考试记录。<br>' +
       '请检查：① 姓名是否输入正确（不要有空格）；② 当前数据是否是<b>包含你这个年级</b>的最新版监考表' +
       (source === 'manual' ? '（当前使用的是手动提交的文件）' : '') + '。');
+  }
+
+  /** 冗余防护：解析结果对象被意外破坏（如扩展冲突/手工篡改）时兜底，避免 UI 崩溃白屏 */
+  function guardParsed() {
+    if (!parsed) return false;
+    if (!parsed.exams || !Array.isArray(parsed.exams) ||
+        !parsed.meta || !Array.isArray(parsed.meta.warnings)) {
+      parsed = null;
+      showMsg('queryMsg', 'error', '内部数据结构异常，请重新提交监考表。');
+      return false;
+    }
+    return true;
   }
 
   /* ---------- 看板渲染 ---------- */
@@ -384,6 +438,7 @@
     board.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
+  /** 单场考试卡片右侧元信息（星期/时长/倒计时文案） */
   function buildMeta(ex) {
     const parts = [];
     if (ex.grade) parts.push('年级 ' + escapeHtml(ex.grade));
