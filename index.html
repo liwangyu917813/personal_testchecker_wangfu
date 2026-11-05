@@ -24,6 +24,7 @@ body {
 @keyframes pulseNow { 0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,6,.35); } 50% { box-shadow: 0 0 0 7px rgba(217,119,6,0); } }
 @keyframes barShimmer { from { background-position: 0 0; } to { background-position: 36px 0; } }
 @keyframes wave { from { background-position: 0 0; } to { background-position: 800px 0; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
@@ -170,6 +171,50 @@ h1 { font-size: 22px; margin-bottom: 6px; }
 .fixBadge { font-size: 11px; color: #0e7490; background: rgba(14,116,144,.10); border: 1px solid rgba(14,116,144,.25); border-radius: 999px; padding: 1px 8px; margin-left: 6px; vertical-align: 2px; cursor: help; animation: popIn .4s ease both; }
 .footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 28px; line-height: 1.7; }
 
+/* ---------- v7：卡片可点击 + 详情弹层 ---------- */
+.examCard.clickable { cursor: pointer; transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.examCard.clickable:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(37,99,235,.15); border-color: rgba(37,99,235,.45); }
+.detailHint { font-size: 11px; opacity: 0; margin-left: 6px; color: var(--accent); font-weight: 700; transition: opacity .18s ease; white-space: nowrap; }
+.examCard.clickable:hover .detailHint, .examCard.clickable:focus .detailHint { opacity: 1; }
+body.modalOpen { overflow: hidden; }
+.detailOverlay { position: fixed; inset: 0; z-index: 999; display: none; }
+.detailOverlay.open { display: block; }
+.detailMask { position: absolute; inset: 0; background: rgba(15,23,42,.55); backdrop-filter: blur(2px); animation: fadeIn .2s ease both; }
+.detailModal {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 36px)); max-height: 82vh; overflow-y: auto;
+  background: #fff; border-radius: 18px; padding: 26px 26px 22px;
+  box-shadow: 0 24px 64px rgba(15,23,42,.35); animation: popIn .28s cubic-bezier(.2,.9,.3,1.2) both;
+}
+.detailClose {
+  position: absolute; right: 14px; top: 12px; width: 32px; height: 32px;
+  border: none; border-radius: 50%; background: #f1f5f9; color: #475569;
+  font-size: 15px; cursor: pointer; transition: background .15s ease, transform .15s ease;
+}
+.detailClose:hover { background: #e2e8f0; transform: rotate(90deg); }
+.dtDate { font-size: 19px; font-weight: 800; color: #0f172a; margin-bottom: 6px; padding-right: 34px; }
+.dtTime { font-size: 14px; color: var(--muted); font-weight: 600; margin-left: 8px; }
+.dtMeta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 4px; }
+.dtSubject { font-size: 16px; font-weight: 800; color: var(--accent); }
+.dtRoom { font-size: 13.5px; font-weight: 700; color: #0f172a; background: #f1f5f9; border-radius: 8px; padding: 3px 10px; }
+.dtTag { font-size: 12px; color: #475569; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 999px; padding: 2px 10px; }
+.dtSection { margin-top: 16px; }
+.dtSecTitle { font-size: 13.5px; font-weight: 800; color: #334155; margin-bottom: 8px; }
+.dtSecHint { font-size: 11.5px; font-weight: 500; color: var(--muted); margin-left: 8px; }
+.dtChips { display: flex; flex-wrap: wrap; gap: 7px; }
+.dtChip {
+  font-size: 13px; font-weight: 600; border-radius: 999px; padding: 4px 12px;
+  background: #f1f5f9; color: #334155; border: 1px solid transparent;
+  animation: popIn .3s ease both;
+}
+.dtChip.proctor { background: #eff6ff; color: #1d4ed8; border-color: rgba(29,78,216,.18); }
+.dtChip.student { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
+.dtChip.student:hover { background: #eef2ff; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(37,99,235,.18); }
+.dtNone { font-size: 13px; color: var(--muted); font-style: italic; }
+.candCount { font-size: 11.5px; color: var(--muted); font-weight: 600; margin-left: 5px; }
+.candTag { font-size: 10.5px; color: #1d4ed8; background: #eff6ff; border-radius: 999px; padding: 1px 7px; margin-left: 5px; font-weight: 700; }
+.candMore { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+
 /* ---------- 在线数据源状态（v1 网页部署版） ---------- */
 .msg.ok { background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0; }
 .manualToggleRow { margin-top: 12px; font-size: 13px; }
@@ -185,11 +230,15 @@ h1 { font-size: 22px; margin-bottom: 6px; }
   .examCard { break-inside: avoid; animation: none; }
   .dayGroup { animation: none; }
   .cdBar > i::after { animation: none; }
+  .detailOverlay { display: none !important; }  /* 打印时不输出弹层 */
+  .detailHint { display: none; }
 }
 @media (max-width: 560px) {
   .examCard { grid-template-columns: 1fr; }
   .examCard .roomTag { justify-self: start; }
   .card { padding: 20px 16px; }
+  .detailModal { padding: 22px 16px 18px; border-radius: 14px; }
+  .dtChips { gap: 6px; }
 }
 </style>
 </head>
@@ -1039,6 +1088,20 @@ function _P6_buildRecords(ctx) {
     const grade = row[colIdx.grade] != null ? String(row[colIdx.grade]).trim() : '';
     const klass = row[colIdx.klass] != null ? String(row[colIdx.klass]).trim() : '';
 
+    // 监考老师提取（v7）：proctor1/proctor2 列；同格多人（换行/顿号/逗号分隔）拆分。
+    // 合并单元格已由 P1 的 mergedMap 展开到 grid，监考列的纵向合并天然生效。
+    const proctors = [];
+    for (const pc of [colIdx.proctor1, colIdx.proctor2]) {
+      if (pc == null || pc < 0) continue;
+      const pv = row[pc];
+      if (pv === undefined || pv === null) continue;
+      const sRaw = String(pv).trim();
+      if (!sRaw || /^(监考|Proctor)(1|2)?$/i.test(sRaw)) continue;   // 表头行残留
+      for (const piece of sRaw.split(/[、，;；,\n\r]+/).map((x) => x.trim()).filter(Boolean)) {
+        if (!proctors.includes(piece)) proctors.push(piece);
+      }
+    }
+
     // 冗余交叉验证：报名人数列 vs 实际学生名单数 —— 两者不一致提示可能漏名单
     if (colIdx.count >= 0) {
       const cv = row[colIdx.count];
@@ -1065,6 +1128,7 @@ function _P6_buildRecords(ctx) {
       klass: klass,
       room: room || '（未标注）',
       students: students,
+      proctors: proctors,
       repairedFrom: entry.dateRepaired ? entry.dateRepaired.from : null,
       _row: r + 1,
     });
@@ -1103,6 +1167,54 @@ function _P7_finalize(ctx) {
 
 
 /* ---------- 按姓名查找 ---------- */
+
+/**
+ * 模糊匹配打分（v7）：输入 query 相对姓名 name 的贴合程度，分数越高越靠前。
+ *   100  姓名以输入开头（"王艺" vs "王艺睿"——前缀是最强信号）
+ *    80  输入的字符在姓名中连续出现（非开头，如 "艺睿"）
+ *     80 - 起始位置  姓名中段命中（越靠前分越高）
+ *     10  乱序全字符命中（每个字都在，顺序不同）
+ *     0   其他（双向子串但未覆盖上述情形的兜底）
+ * @param {string} name  归一化后的名单姓名
+ * @param {string} query 归一化后的用户输入
+ * @returns {number} 分数
+ */
+function scoreMatch(name, query) {
+  if (!query) return 0;
+  if (name === query) return 200;
+  if (name.startsWith(query)) return 100;
+  const idx = name.indexOf(query);
+  if (idx > 0) return Math.max(1, 80 - idx);
+  // 乱序：每个字符都出现（仅在调用方已确认无子串命中时作为兜底，这里给出低分）
+  let all = true;
+  for (const ch of query) if (!name.includes(ch)) { all = false; break; }
+  return all ? 10 : 0;
+}
+
+/**
+ * 单场考试详情（v7，公开 API，供 UI「点击查看详情」弹层调用）。
+ * 返回该场的完整信息：时间/地点/年级班级 + 监考老师（proctors）+ 同场全部学生。
+ * @param {{exams:Array}} parsed parseWorkbook 的返回值
+ * @param {number|string} indexOrRef 考试在 parsed.exams 中的下标，或带 _row 的考试对象
+ * @returns {object|null} 详情对象；无效输入返回 null（调用方自行兜底）
+ */
+function getExamDetail(parsed, indexOrRef) {
+  if (!parsed || !Array.isArray(parsed.exams)) return null;
+  let ex = null;
+  if (typeof indexOrRef === 'number' && parsed.exams[indexOrRef]) ex = parsed.exams[indexOrRef];
+  else if (indexOrRef && typeof indexOrRef === 'object' && typeof indexOrRef._row === 'number') {
+    ex = parsed.exams.find((e) => e._row === indexOrRef._row) || null;
+  }
+  if (!ex) return null;
+  return {
+    date: ex.date, weekday: ex.weekday, time: ex.time, minutes: ex.minutes,
+    subject: ex.subject, grade: ex.grade, klass: ex.klass, room: ex.room,
+    proctors: Array.isArray(ex.proctors) ? ex.proctors.slice() : [],
+    students: Array.isArray(ex.students) ? ex.students.slice() : [],
+    repairedFrom: ex.repairedFrom || null,
+    sourceRow: ex._row,
+  };
+}
 
 /**
  * 按姓名查找考试（公开 API，供 UI 层调用）。
@@ -1167,7 +1279,9 @@ function findExamsForStudent(parsed, rawName) {
     };
   }
 
-  // 部分匹配（含大小写/全半角容错）：输入为名单子串，或名单为输入子串
+  // 部分匹配（含大小写/全半角容错）：输入为名单子串，或名单为输入子串。
+  // v7 强化：任意子串命中即列出（"王"→所有含王的姓名）；再叠加逐字连续匹配打分，
+  // 输入的字符在姓名中越靠前、越连续，排序越靠前（"王艺"排在"王宇航"前面）。
   const partial = [];
   const seen = new Set();
   for (const ex of parsed.exams) {
@@ -1175,14 +1289,27 @@ function findExamsForStudent(parsed, rawName) {
       const ns = normalizeName(st);
       if (!ns) continue;
       if (ns.includes(name) || name.includes(ns)) {
-        if (!seen.has(ns)) { seen.add(ns); partial.push({ student: st, norm: ns, examCount: 0 }); }
+        if (!seen.has(ns)) { seen.add(ns); partial.push({ student: st, norm: ns, examCount: 0, score: scoreMatch(ns, name) }); }
+      }
+    }
+  }
+  // 冗余兜底：子串双向匹配无结果时，退化为"输入的每个字符都出现在姓名中"（乱序命中，
+  // 如 "王睿" 命中 "王艺睿"），score 更低排在后面，确保能找到但排序合理。
+  if (!partial.length && name.length >= 2) {
+    for (const ex of parsed.exams) {
+      for (const st of ex.students) {
+        const ns = normalizeName(st);
+        if (!ns || seen.has(ns)) continue;
+        let ok = true;
+        for (const ch of name) if (!ns.includes(ch)) { ok = false; break; }
+        if (ok) { seen.add(ns); partial.push({ student: st, norm: ns, examCount: 0, score: scoreMatch(ns, name) }); }
       }
     }
   }
   for (const p of partial) {
     p.examCount = parsed.exams.filter((ex) => ex.students.some((st) => normalizeName(st) === p.norm)).length;
   }
-  partial.sort((a, b) => a.norm.localeCompare(b.norm));
+  partial.sort((a, b) => (b.score - a.score) || a.norm.localeCompare(b.norm));
   if (partial.length) return { status: 'partial', candidates: partial };
 
   return { status: 'not-found' };
@@ -1190,9 +1317,9 @@ function findExamsForStudent(parsed, rawName) {
 
 /* ---------- 导出 ---------- */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseWorkbook, findExamsForStudent, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
+  module.exports = { parseWorkbook, findExamsForStudent, getExamDetail, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
 } else if (typeof window !== 'undefined') {
-  window.ExamCore = { parseWorkbook, findExamsForStudent, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
+  window.ExamCore = { parseWorkbook, findExamsForStudent, getExamDetail, scoreMatch, normalizeName, fmtTimeRange, fmtSingleTime, rawDateCands, weekdayCN };
 }
 
 </script>
