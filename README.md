@@ -1,5 +1,5 @@
 # 期中考试个人看板 
-没啥，AI搓的，只是想玩一玩，现有的https://brsexam.approacher.org/更完善
+没啥，AI搓的，只是想玩一玩，现有的https://brsexam.approacher.org/ 更完善
 
 
 
