@@ -176,18 +176,16 @@ h1 { font-size: 22px; margin-bottom: 6px; }
 .examCard.clickable:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(37,99,235,.15); border-color: rgba(37,99,235,.45); }
 .detailHint { font-size: 11px; opacity: 0; margin-left: 6px; color: var(--accent); font-weight: 700; transition: opacity .18s ease; white-space: nowrap; }
 .examCard.clickable:hover .detailHint, .examCard.clickable:focus .detailHint { opacity: 1; }
-body.modalOpen { overflow: hidden; }
-.detailOverlay { position: fixed; inset: 0; z-index: 9999; display: none; }
-.detailOverlay.open { display: block; }
-.detailMask { position: absolute; inset: 0; background: rgba(15,23,42,.55); backdrop-filter: blur(2px); animation: fadeIn .2s ease both; }
-/* v7.2：弹窗居中改用 flex 布局（不依赖 transform 定位），任何屏幕尺寸都严格居中且不出屏 */
-.detailOverlay.open { display: flex; align-items: center; justify-content: center; padding: 18px; }
-.detailModal {
-  position: relative;
-  width: min(560px, 100%); max-height: min(82vh, 100%); overflow-y: auto;
-  background: #fff; border-radius: 18px; padding: 26px 26px 22px;
-  box-shadow: 0 24px 64px rgba(15,23,42,.35); animation: popIn .28s cubic-bezier(.2,.9,.3,1.2) both;
+/* ---------- v8：原生 <dialog> 详情弹窗（浏览器负责居中/置顶/遮罩/Esc，杜绝定位偏差） ---------- */
+dialog#detailDlg {
+  border: none; border-radius: 18px; padding: 26px 26px 22px;
+  width: min(560px, calc(100% - 36px)); max-height: min(82vh, calc(100% - 36px));
+  overflow-y: auto;
+  background: #fff; color: var(--text);
+  box-shadow: 0 24px 64px rgba(15,23,42,.35);
 }
+dialog#detailDlg::backdrop { background: rgba(15,23,42,.55); backdrop-filter: blur(2px); }
+dialog#detailDlg[open] { animation: popIn .28s cubic-bezier(.2,.9,.3,1.2) both; }
 .detailClose {
   position: absolute; right: 14px; top: 12px; width: 32px; height: 32px;
   border: none; border-radius: 50%; background: #f1f5f9; color: #475569;
@@ -232,20 +230,21 @@ body.modalOpen { overflow: hidden; }
   .examCard { break-inside: avoid; animation: none; }
   .dayGroup { animation: none; }
   .cdBar > i::after { animation: none; }
-  .detailOverlay { display: none !important; }  /* 打印时不输出弹层 */
+  dialog#detailDlg { display: none !important; }  /* 打印时不输出弹窗 */
   .detailHint { display: none; }
 }
 @media (max-width: 560px) {
   .examCard { grid-template-columns: 1fr; }
   .examCard .roomTag { justify-self: start; }
   .card { padding: 20px 16px; }
-  .detailOverlay.open { padding: 10px; }   /* v7.2：小屏留出遮罩边距，弹窗仍 flex 居中 */
-  .detailModal { padding: 22px 16px 18px; border-radius: 14px; }
+  dialog#detailDlg { padding: 22px 16px 18px; border-radius: 14px; }   /* v8：小屏收窄内边距，居中仍由浏览器负责 */
   .dtChips { gap: 6px; }
 }
 </style>
 </head>
 <body>
+<!-- v8：原生对话框（浏览器负责居中、遮罩、Esc、置顶；showModal() 打开） -->
+<dialog id="detailDlg" aria-label="考试详情"></dialog>
 <div class="wrap">
 
   <!-- 步骤 1：数据源（在线自动加载 + 手动上传备用） -->
